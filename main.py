@@ -6,6 +6,11 @@ from spotipy.cache_handler import  MemoryCacheHandler
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 import os
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 # Replace these with your actual Spotify API credentials
 CLIENT_ID = os.environ['SP_CLIENT_ID']
@@ -36,66 +41,53 @@ while results:
 # Extract track IDs
 track_ids = [item['track']['id'] for item in liked_songs]
 
-# Fetch audio features in batches (Spotify API may limit batch sizes)
-audio_features_list = []
-for i in range(0, len(track_ids), 100):  # The maximum batch size for Spotify's API is 100
-    audio_features_list.extend(sp.audio_features(track_ids[i:i+100]))
+# Retrieve audio features for each track
+audio_features = sp.audio_features(track_ids)
 
-# Create a DataFrame with detailed metadata about each song
-songs_data = []
-for item, audio_features in zip(liked_songs, audio_features_list):
-    if audio_features:
-        song_info = {
-            'Track Name': item['track']['name'],
-            'Artist': ', '.join(artist['name'] for artist in item['track']['artists']),
-            'Album': item['track']['album']['name'],
-            'Release Date': item['track']['album']['release_date'],
-            'Duration (ms)': item['track']['duration_ms'],
-            'Popularity': item['track']['popularity'],
-            'Track ID': item['track']['id'],
-            'Spotify URL': item['track']['external_urls']['spotify'],
-            'Album Type': item['track']['album']['album_type'],
-            'Total Tracks in Album': item['track']['album']['total_tracks'],
-            'Danceability': audio_features['danceability'],
-            'Energy': audio_features['energy'],
-            'Key': audio_features['key'],
-            'Loudness': audio_features['loudness'],
-            'Mode': audio_features['mode'],
-            'Speechiness': audio_features['speechiness'],
-            'Acousticness': audio_features['acousticness'],
-            'Instrumentalness': audio_features['instrumentalness'],
-            'Liveness': audio_features['liveness'],
-            'Valence': audio_features['valence'],
-            'Tempo': audio_features['tempo']
-        }
-        songs_data.append(song_info)
+# Extract and scale audio features such as danceability, energy, etc.
+features_list = ['danceability', 'energy', 'key', 'loudness', 'mode',
+                 'speechiness', 'acousticness', 'instrumentalness', 'liveness',
+                 'valence', 'tempo']
+audio_features_df = pd.DataFrame(audio_features)
+audio_features_scaled = StandardScaler().fit_transform(audio_features_df[features_list])
 
-df = pd.DataFrame(songs_data)
+# Extract artist IDs from tracks
+artist_ids = set()  # Use a set to avoid duplicates
+track_artist_map = []  # To map tracks with their artists
+for item in liked_songs:
+    track = item['track']
+    track_artists = [artist['id'] for artist in track['artists']]
+    track_artist_map.append(track_artists)
+    for artist in track_artists:
+        artist_ids.add(artist)
 
+# Retrieve genres for each artist
+artist_genres = {}
+for artist_id in artist_ids:
+    artist_info = sp.artist(artist_id)
+    artist_genres[artist_info['id']] = artist_info['genres']
 
-# Select relevant audio features for clustering
-audio_features = ['Danceability', 'Energy', 'Loudness', 
-                  'Speechiness', 'Acousticness', 'Instrumentalness', 
-                  'Liveness', 'Valence', 'Tempo']
+# Compute artist embeddings
+model = SentenceTransformer('all-MiniLM-L6-v2')
+artist_embeddings_dict = {artist_id: model.encode(', '.join(genres) + ' music') for artist_id, genres in artist_genres.items()}
 
-n_cluster = 15
-# Standardize the audio features
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(df[audio_features])
+# Map track to their average artist embeddings
+track_embeddings = []
+for track_artists in track_artist_map:
+    embeddings = [artist_embeddings_dict[artist_id] for artist_id in track_artists]
+    avg_embedding = np.mean(embeddings, axis=0)
+    track_embeddings.append(avg_embedding)
 
-# Apply K-Means clustering
-kmeans = KMeans(n_clusters=n_cluster, random_state=42)  # Adjust n_clusters as needed
-df['Cluster'] = kmeans.fit_predict(X_scaled)
+# Standardizing the artist embeddings
+track_embeddings_scaled = StandardScaler().fit_transform(track_embeddings)
 
-# Optional: Analyze the distribution of songs per cluster
-print(df['Cluster'].value_counts())
+# Concatenate audio features and artist embeddings
+combined_features = np.hstack((audio_features_scaled, track_embeddings_scaled))
 
-# Determine number of top songs to display from each cluster
-top_n = 5
+# Clustering combined features
+kmeans_combined = KMeans(n_clusters=5, random_state=42).fit(combined_features)
+combined_cluster_labels = kmeans_combined.labels_
 
-# Print the top songs from each cluster
-for cluster in range(n_cluster):  # Change 10 to your number of clusters
-    print(f"\nTop {top_n} Songs from Cluster {cluster}:")
-    cluster_songs = df[df['Cluster'] == cluster]
-    top_songs = cluster_songs.sort_values(by='Popularity', ascending=False).head(top_n)
-    print(top_songs[['Track Name', 'Artist', 'Popularity']])
+# Print or further process clusters
+print("Combined feature-based clusters:")
+print(combined_cluster_labels)
